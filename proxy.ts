@@ -18,13 +18,25 @@ const APP_ROUTES = ["/app"];
 
 export default auth((req: NextRequest & { auth: { user?: { role?: string; onboardingCompleted?: boolean } } | null }) => {
   const { nextUrl } = req;
+  const pathname = nextUrl.pathname;
   const session = req.auth;
   const isLoggedIn = !!session?.user;
 
-  const isPublicRoute = PUBLIC_ROUTES.some((route) => nextUrl.pathname === route);
-  const isAuthRoute = AUTH_ROUTES.some((route) => nextUrl.pathname.startsWith(route));
-  const isAdminRoute = ADMIN_ROUTES.some((route) => nextUrl.pathname.startsWith(route));
-  const isAppRoute = APP_ROUTES.some((route) => nextUrl.pathname.startsWith(route));
+  if (
+    pathname.startsWith("/_next/") ||
+    pathname.startsWith("/api/") ||
+    pathname === "/favicon.ico" ||
+    pathname === "/robots.txt" ||
+    pathname === "/sitemap.xml" ||
+    /\.[a-zA-Z0-9]+$/.test(pathname)
+  ) {
+    return NextResponse.next();
+  }
+
+  const isPublicRoute = PUBLIC_ROUTES.some((route) => pathname === route);
+  const isAuthRoute = AUTH_ROUTES.some((route) => pathname.startsWith(route));
+  const isAdminRoute = ADMIN_ROUTES.some((route) => pathname.startsWith(route));
+  const isAppRoute = APP_ROUTES.some((route) => pathname.startsWith(route));
 
   if (isAuthRoute) {
     if (isLoggedIn) {
@@ -43,7 +55,7 @@ export default auth((req: NextRequest & { auth: { user?: { role?: string; onboar
 
   if (isAdminRoute) {
     if (!isLoggedIn) {
-      const callbackUrl = encodeURIComponent(`${nextUrl.pathname}${nextUrl.search}`);
+      const callbackUrl = encodeURIComponent(`${pathname}${nextUrl.search}`);
       return NextResponse.redirect(new URL(`/auth/login?callbackUrl=${callbackUrl}`, nextUrl));
     }
     if (session?.user?.role !== "ADMIN") {
@@ -54,7 +66,7 @@ export default auth((req: NextRequest & { auth: { user?: { role?: string; onboar
 
   if (isAppRoute) {
     if (!isLoggedIn) {
-      const callbackUrl = encodeURIComponent(nextUrl.pathname);
+      const callbackUrl = encodeURIComponent(pathname);
       return NextResponse.redirect(new URL(`/auth/login?callbackUrl=${callbackUrl}`, nextUrl));
     }
 
