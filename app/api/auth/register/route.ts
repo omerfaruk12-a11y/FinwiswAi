@@ -58,7 +58,10 @@ export async function POST(req: NextRequest) {
       },
     });
 
-    await sendWelcomeEmail(user.email, user.name);
+    const welcomeEmailSent = await sendWelcomeEmail(user.email, user.name);
+    if (!welcomeEmailSent) {
+      throw new Error("WELCOME_EMAIL_SEND_FAILED");
+    }
 
     return successResponse(user, undefined, 201);
   } catch (error) {

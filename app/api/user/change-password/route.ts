@@ -50,11 +50,14 @@ export async function PATCH(req: NextRequest) {
       data: { passwordHash: newHash },
     });
 
-    await sendSecurityNotificationEmail(
+    const securityEmailSent = await sendSecurityNotificationEmail(
       user.email,
       "Şifre değiştirildi",
       "Hesabınızın parolası başarıyla değiştirildi. Bu işlemi siz yapmadıysanız hemen destek ile iletişim kurun."
     );
+    if (!securityEmailSent) {
+      throw new Error("SECURITY_EMAIL_SEND_FAILED");
+    }
 
     return successResponse({ message: "Şifre başarıyla değiştirildi." });
   } catch (error) {

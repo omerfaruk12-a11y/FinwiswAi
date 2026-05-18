@@ -35,7 +35,10 @@ export async function POST(req: NextRequest) {
       const appUrl = (process.env.NEXT_PUBLIC_APP_URL || process.env.NEXTAUTH_URL || "http://localhost:3000").replace(/\/+$/, "");
       const resetUrl = `${appUrl}/auth/reset-password?token=${token}`;
 
-      await sendPasswordResetEmail(user.email, resetUrl);
+      const resetEmailSent = await sendPasswordResetEmail(user.email, resetUrl);
+      if (!resetEmailSent) {
+        throw new Error("PASSWORD_RESET_EMAIL_SEND_FAILED");
+      }
 
       await prisma.adminAuditLog.create({
         data: {

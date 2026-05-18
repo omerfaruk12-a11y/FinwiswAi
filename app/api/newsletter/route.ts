@@ -34,7 +34,10 @@ export async function POST(req: NextRequest) {
       },
     });
 
-    await sendNewsletterWelcomeEmail(email);
+    const newsletterEmailSent = await sendNewsletterWelcomeEmail(email);
+    if (!newsletterEmailSent) {
+      throw new Error("NEWSLETTER_EMAIL_SEND_FAILED");
+    }
 
     return successResponse({
       message: "E-posta adresiniz finansal ipuclari listesine eklendi.",
