@@ -25,6 +25,10 @@ function getSafeCallbackUrl(value: string | null): string {
   if (!value) return "/app";
 
   try {
+    if (typeof window === "undefined") {
+      return value.startsWith("/") && !value.startsWith("/auth/") ? value : "/app";
+    }
+
     const url = value.startsWith("/")
       ? new URL(value, window.location.origin)
       : new URL(value);
