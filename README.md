@@ -156,7 +156,7 @@ Bu projede demo seed dosyası kullanılmaz. Veritabanı temiz başlar; kullanıc
 
 ## Ortam Değişkenleri
 
-`.env.example` dosyasını `.env.local` olarak kopyalayıp değerleri doldur.
+Bu proje yalnızca `.env.local` dosyasını aktif olarak kullanır. Tüm ortam değişkenlerini bu dosyada tut.
 
 ```env
 DATABASE_URL="postgresql://user:password@localhost:5432/finwise_ai"
@@ -174,11 +174,12 @@ NEXT_PUBLIC_APP_URL="http://localhost:3000"
 NEXT_PUBLIC_APP_NAME="FinWise AI"
 
 EMAIL_PROVIDER="smtp"
-SMTP_HOST="smtp.gmail.com"
+SMTP_HOST="srvm01.turhost.com"
 SMTP_PORT="465"
-SMTP_USER="mail@example.com"
-SMTP_PASS="smtp-app-password"
-MAIL_FROM_EMAIL="mail@example.com"
+SMTP_SECURE="true"
+SMTP_USER="info@finwiseai.com.tr"
+SMTP_PASS="smtp-parolaniz"
+MAIL_FROM_EMAIL="info@finwiseai.com.tr"
 MAIL_FROM_NAME="FinWise AI"
 
 RESEND_API_KEY=""
@@ -494,8 +495,7 @@ FinWise AI/
 ├─ tsconfig.scripts.json
 ├─ package.json
 ├─ package-lock.json
-├─ .env.example
-├─ .env.production.example
+├─ .env.local
 └─ README.md
 ```
 
@@ -540,6 +540,7 @@ Production için öneri:
 - Kendi domaininle gönderim yap
 - SPF, DKIM ve DMARC kayıtlarını kur
 - Gmail SMTP yerine mümkünse Resend, Brevo, Mailgun veya Postmark gibi servis kullan
+- Turhost kullanıyorsan `srvm01.turhost.com` SMTP hostunu ve panelde verilen port/şifre bilgilerini kullan
 
 ---
 
@@ -584,8 +585,7 @@ types/
 package.json
 package-lock.json
 README.md
-.env.example
-.env.production.example
+.env.local
 ```
 
 ---

@@ -4,22 +4,59 @@ import { Resend } from "resend";
 const emailProvider = (process.env.EMAIL_PROVIDER || "").trim().toLowerCase();
 const resendApiKey = process.env.RESEND_API_KEY?.trim() || "";
 const resendClient = resendApiKey ? new Resend(resendApiKey) : null;
-const smtpHost = process.env.SMTP_HOST || "smtp.gmail.com";
+
+const smtpHost = process.env.SMTP_HOST || process.env.EMAIL_HOST || "smtp.gmail.com";
 const smtpPort = Number(process.env.SMTP_PORT || "465");
 const smtpUser = process.env.SMTP_USER || "";
 const smtpPass = (process.env.SMTP_PASS || "").replace(/\s+/g, "");
-const mailFromEmail = process.env.MAIL_FROM_EMAIL || process.env.SMTP_FROM_EMAIL || smtpUser;
-const mailFromName = process.env.MAIL_FROM_NAME || process.env.SMTP_FROM_NAME || "FinWise AI";
+const smtpSecure = parseBoolean(process.env.SMTP_SECURE, smtpPort === 465);
+const parsedFrom = parseMailFrom(process.env.MAIL_FROM || process.env.SMTP_FROM || "");
+
+const mailFromEmail =
+  process.env.MAIL_FROM_EMAIL ||
+  process.env.SMTP_FROM_EMAIL ||
+  parsedFrom.email ||
+  smtpUser;
+
+const mailFromName =
+  process.env.MAIL_FROM_NAME ||
+  process.env.SMTP_FROM_NAME ||
+  parsedFrom.name ||
+  "FinWise AI";
+
 const emailTimeoutMs = Number(process.env.SMTP_TIMEOUT_MS || "8000");
 const appBaseUrl = (process.env.NEXT_PUBLIC_APP_URL || process.env.NEXTAUTH_URL || "http://localhost:3000").replace(/\/+$/, "");
 const logoUrl = `${appBaseUrl}/favicon.svg`;
+
+function parseBoolean(value: string | undefined, fallback: boolean) {
+  if (value === undefined || value === null || value === "") return fallback;
+  return ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
+}
+
+function parseMailFrom(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) return { name: "", email: "" };
+
+  const match = trimmed.match(/^\s*"?([^"<]*)"?\s*<([^>]+)>\s*$/);
+  if (match) {
+    return {
+      name: match[1].trim(),
+      email: match[2].trim(),
+    };
+  }
+
+  return {
+    name: "",
+    email: trimmed,
+  };
+}
 
 const smtpTransport =
   smtpUser.length > 0 && smtpPass.length > 0
     ? nodemailer.createTransport({
         host: smtpHost,
         port: smtpPort,
-        secure: smtpPort === 465,
+        secure: smtpSecure,
         connectionTimeout: 10000,
         greetingTimeout: 10000,
         socketTimeout: 15000,

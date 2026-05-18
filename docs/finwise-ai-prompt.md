@@ -102,7 +102,7 @@ lib/finance/calculations.ts
 
 ### 1.6 Deployment ve Yapılandırma
 
-- `.env.example` — tüm ortam değişkenleri açıklamalı şekilde
+- `.env.local` — tüm ortam değişkenleri açıklamalı şekilde
 - `README.md` — kurulum, çalıştırma, seed, demo kullanıcı bilgileri
 - `prisma/schema.prisma` — tam ilişkisel schema
 - Build-ready yapı: `next build` hatasız tamamlanmalı
@@ -1108,7 +1108,7 @@ Proje teslim öncesinde aşağıdakilerin tamamı doğrulanacak:
 - [ ] Tüm API route'larında auth kontrolü mevcut
 - [ ] Tüm API route'larında Zod validasyonu mevcut
 - [ ] Tüm API route'larında try/catch mevcut
-- [ ] `.env.example` tüm değişkenleri içeriyor
+- [ ] `.env.local` tüm değişkenleri içeriyor
 - [ ] README kurulum adımları eksiksiz
 
 ### UX Kalite
@@ -1125,7 +1125,7 @@ Proje teslim öncesinde aşağıdakilerin tamamı doğrulanacak:
 ## 16. Ortam Değişkenleri
 
 ```env
-# .env.example
+# .env.local
 
 # Veritabanı
 DATABASE_URL="postgresql://user:password@localhost:5432/finwise_ai"
@@ -1161,7 +1161,6 @@ cd finwise-ai
 npm install
 
 # 3. Ortam değişkenlerini ayarla
-cp .env.example .env.local
 # .env.local dosyasını düzenle
 
 # 4. Veritabanını oluştur
@@ -1226,7 +1225,7 @@ Aşağıdaki sırayı takip et. Her adım bir sonrakinin altyapısına bağlıd�
 17. Tüm app sayfaları
 18. Admin paneli
 19. Final build testi + hata düzeltme
-20. README + .env.example güncelleme
+20. README + `.env.local` güncelleme
 ```
 
 ---
