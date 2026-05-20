@@ -79,17 +79,18 @@ function normalizeCommandText(value: string): string {
 
 function isTableFollowUpCommand(value: string): boolean {
   const normalized = normalizeCommandText(value);
+  // Pre-normalized list (same normalizeCommandText rules applied)
   return [
     "tablo",
-    "tabloyla göster",
-    "tablo halinde göster",
-    "tablo olarak göster",
-    "tablo göster",
-    "bunu tabloyla göster",
-    "bunu tabloya çevir",
-    "bunu tablo olarak göster",
-    "tabloya çevir",
-    "tabloya dönüştür",
+    "tabloyla goster",
+    "tablo halinde goster",
+    "tablo olarak goster",
+    "tablo goster",
+    "bunu tabloyla goster",
+    "bunu tabloya cevir",
+    "bunu tablo olarak goster",
+    "tabloya cevir",
+    "tabloya donustur",
   ].includes(normalized);
 }
 
@@ -97,66 +98,68 @@ function escapeTableCell(value: string | number | null | undefined): string {
   return String(value ?? "-").replace(/\|/g, "\\|").replace(/\r?\n+/g, " ").trim();
 }
 
-function formatMetricValue(value: number): string {
-  return new Intl.NumberFormat("tr-TR", {
-    maximumFractionDigits: 2,
-  }).format(value);
-}
 
 function buildTableResponse(response: AIResponse): string {
-  const compactSections: string[] = ["Mevcut cevabı daha okunabilir bir tabloya çevirdim."];
-  const compactMetricRows = [
-    ["Aylık gelir", response.numbers.monthlyIncome],
-    ["Aylık gider", response.numbers.monthlyExpense],
-    ["Tahmini tasarruf", response.numbers.estimatedSaving],
-    ["Borç yükü", response.numbers.debtLoadRatio],
-    ["Finansal sağlık skoru", response.numbers.financialHealthScore],
-  ]
-    .filter(([, value]) => typeof value === "number" && Number.isFinite(value))
-    .map(([label, value]) => `| ${escapeTableCell(label)} | ${formatMetricValue(value as number)} |`);
+  const nums = response.numbers;
+  const income = nums.monthlyIncome ?? 0;
+  const expense = nums.monthlyExpense ?? 0;
+  const saving = nums.estimatedSaving ?? 0;
+  const netCash = income - expense;
+  const savingRate = income > 0 ? (saving / income) * 100 : 0;
+  const healthScore = nums.financialHealthScore;
+  const debtRatio = nums.debtLoadRatio;
 
-  if (compactMetricRows.length > 0) {
-    compactSections.push(
-      [
-        "### Ana Metrikler",
-        "| Gösterge | Değer |",
-        "| --- | --- |",
-        ...compactMetricRows,
-      ].join("\n"),
-    );
+  const fmt = (v: number) => new Intl.NumberFormat("tr-TR").format(Math.round(v)) + " ₺";
+  const esc = escapeTableCell;
+
+  const cashStatus = netCash >= 0 ? "Pozitif ✓" : "Negatif ✗";
+  const savRateStatus = savingRate >= 20 ? "İyi ✓" : savingRate >= 10 ? "Orta ↗" : "Düşük ✗";
+  const debtStatus =
+    debtRatio != null
+      ? debtRatio > 35
+        ? "Yüksek Risk ✗"
+        : debtRatio > 20
+        ? "Dikkat ↗"
+        : "Kontrollü ✓"
+      : null;
+  const scoreStatus =
+    healthScore != null
+      ? healthScore >= 80
+        ? "Güçlü ✓"
+        : healthScore >= 60
+        ? "Orta ↗"
+        : "Düşük ✗"
+      : null;
+
+  // Yalnızca harcama kategorisi chartlarından en büyük gideri al (skor bileşeni chartı değil)
+  const isExpenseChart = response.chart?.title?.toLowerCase().includes("gider");
+  const topCat = isExpenseChart ? response.chart?.data?.[0] : undefined;
+
+  const rows: string[] = [];
+  if (income > 0) rows.push(`| Aylık Gelir | ${fmt(income)} | Güçlü ✓ |`);
+  if (expense > 0)
+    rows.push(`| Aylık Gider | ${fmt(expense)} | ${expense / income > 0.8 ? "Yüksek ↗" : "Kontrollü ✓"} |`);
+  if (income > 0) rows.push(`| Net Nakit Akışı | ${fmt(netCash)} | ${cashStatus} |`);
+  if (income > 0) rows.push(`| Tasarruf Oranı | %${savingRate.toFixed(1)} | ${savRateStatus} |`);
+  if (topCat) rows.push(`| En Büyük Gider Kategorisi | ${esc(topCat.label)} | ${fmt(topCat.value)} |`);
+  if (debtStatus) rows.push(`| Borç Yükü | %${debtRatio!.toFixed(1)} | ${debtStatus} |`);
+  if (scoreStatus) rows.push(`| Finansal Sağlık Skoru | ${healthScore}/100 | ${scoreStatus} |`);
+
+  const sections: string[] = [];
+  if (rows.length > 0) {
+    sections.push(["| Alan | Değer | Durum |", "| --- | --- | --- |", ...rows].join("\n"));
   }
 
-  const compactChart = response.chart;
-  if (compactChart?.data?.length) {
-    compactSections.push(
-      [
-        "### Kategori Dağılımı",
-        `**${escapeTableCell(compactChart.title)}**`,
-        "| Kategori | Tutar |",
-        "| --- | --- |",
-        ...compactChart.data
-          .slice(0, 6)
-          .map((point) => `| ${escapeTableCell(point.label)} | ${formatMetricValue(point.value)} |`),
-      ].join("\n"),
-    );
-  }
-
-  const compactRecommendationRows = response.recommendations
+  const recRows = response.recommendations
     .slice(0, 3)
-    .map((item) => `| ${escapeTableCell(item.title)} | ${escapeTableCell(item.action)} |`);
-
-  if (compactRecommendationRows.length > 0) {
-    compactSections.push(
-      [
-        "### Öncelikli Aksiyonlar",
-        "| Başlık | Ne yapılacak? |",
-        "| --- | --- |",
-        ...compactRecommendationRows,
-      ].join("\n"),
+    .map((r) => `| ${esc(r.title)} | ${esc(r.action ?? "")} |`);
+  if (recRows.length > 0) {
+    sections.push(
+      ["### Öncelikli Aksiyonlar", "| Başlık | Yapılacak |", "| --- | --- |", ...recRows].join("\n"),
     );
   }
 
-  return compactSections.join("\n\n");
+  return sections.join("\n\n");
 }
 
 async function readSSEStream(

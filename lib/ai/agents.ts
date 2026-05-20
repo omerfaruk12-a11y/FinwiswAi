@@ -12,6 +12,12 @@ import {
   ACTION_PLAN_PROMPT,
   REPORT_PROMPT,
   EXPLANATION_PROMPT,
+  INCOME_EXPENSE_BALANCE_PROMPT,
+  TABLE_FORMAT_PROMPT,
+  EXPLAIN_PREVIOUS_PROMPT,
+  MONTHLY_ACTION_PLAN_PROMPT,
+  BUDGET_OVERRUN_PROMPT,
+  DEBT_ANALYSIS_PROMPT,
   DISCLAIMER,
 } from "./prompts";
 import {
@@ -27,10 +33,17 @@ import {
   type ReportOutput,
 } from "./schemas";
 
+export interface ConversationContext {
+  lastAssistantContent: string;
+  lastAssistantMetadata: import("./schemas").AIResponse | null;
+  recentHistory: Array<{ role: "USER" | "ASSISTANT"; content: string }>;
+}
+
 export interface AgentInput {
   userId: string;
   userMessage?: string;
   financialData: FinancialContext;
+  conversationContext?: ConversationContext;
 }
 
 export interface FinancialContext {
@@ -811,28 +824,100 @@ JSON formatında yanıt ver:
 // ============================================================
 export function buildGoalPlannerPrompt(input: AgentInput, goalId?: string): { prompt: string; systemPrompt: string } {
   const contextStr = buildContextString(input.financialData);
-  const targetGoal = goalId
-    ? input.financialData.goals.find((g) => g.id === goalId)
-    : input.financialData.goals[0];
+  const data = input.financialData;
+  const today = new Date();
 
-  const goalContext = targetGoal
-    ? `Analiz edilecek hedef: ${targetGoal.title} - Hedef: ${targetGoal.targetAmount} ${input.financialData.currency}, Mevcut: ${targetGoal.currentAmount} ${input.financialData.currency}`
-    : "Tüm aktif hedefler";
+  const goalsWithCalc = data.goals.map(g => {
+    const remaining = g.targetAmount - g.currentAmount;
+    const deadline = g.deadline ? new Date(g.deadline) : null;
+    const monthsLeft = deadline
+      ? Math.max(1, Math.ceil((deadline.getTime() - today.getTime()) / (1000 * 60 * 60 * 24 * 30.44)))
+      : null;
+    const monthlyNeeded = monthsLeft !== null ? remaining / monthsLeft : null;
+    const netCash = data.netCashflow;
+    const feasibility = monthlyNeeded === null
+      ? "Tarih yok — güvenli katkı öner"
+      : monthlyNeeded > netCash
+        ? "UYARI: Gerekli katkı nakit akışından yüksek — agresif"
+        : monthlyNeeded > netCash * 0.7
+          ? "UYARI: Nakit akışının %70'inden fazla — zorlu"
+          : monthlyNeeded > netCash * 0.3
+            ? "Orta — sürdürülebilir"
+            : "Güvenli — sürdürülebilir";
+
+    return [
+      `### ${g.title}`,
+      `- Hedef Tutar: ${g.targetAmount.toFixed(0)} ${data.currency}`,
+      `- Mevcut Birikim: ${g.currentAmount.toFixed(0)} ${data.currency}`,
+      `- Kalan Tutar: ${remaining.toFixed(0)} ${data.currency}`,
+      `- İlerleme: %${g.progressPercent.toFixed(0)}`,
+      g.deadline ? `- Son Tarih: ${g.deadline}` : "- Son Tarih: Belirtilmemiş",
+      monthsLeft !== null ? `- Kalan Süre: ~${monthsLeft} ay` : "",
+      monthlyNeeded !== null
+        ? `- Gerekli Aylık Katkı: ${monthlyNeeded.toFixed(0)} ${data.currency} (Hesap: ${remaining.toFixed(0)} ÷ ${monthsLeft} ay)`
+        : `- Gerekli Aylık Katkı: Tarih belirsiz — net nakit akışının %30-50'si önerilir`,
+      `- Fizibilite Değerlendirmesi: ${feasibility}`,
+    ].filter(Boolean).join("\n");
+  }).join("\n\n");
+
+  const noGoals = data.goals.length === 0;
 
   const prompt = `${contextStr}
 
-${goalContext}
+KULLANICI SORUSU: ${input.userMessage ?? "Hedeflerime ulaşmak için aylık ne kadar ayırmam mantıklı?"}
 
-Net aylık nakit akışı: ${input.financialData.netCashflow.toFixed(0)} ${input.financialData.currency}
+NET AYLIK NAKİT AKIŞI: ${data.netCashflow.toFixed(0)} ${data.currency}
 
-Bu hedefin fizibilite analizini yap. JSON formatında yanıt ver:
+${noGoals
+  ? "AKTİF HEDEF: Kayıtlı aktif hedef bulunamadı."
+  : `HEDEF ANALİZİ (formül: kalan_tutar ÷ kalan_ay = gerekli_aylık_katkı):\n\n${goalsWithCalc}`}
+
+GÖREV KURALLARI:
+1. Her hedef için gerekli aylık katkıyı yukarıdaki hesaplanan değeri kullanarak söyle.
+2. Gerekli katkı > net nakit akışı ise AÇIKÇA "Bu katkı mevcut nakit akışından yüksek — agresif plan" de.
+3. Gerekli katkı, net nakit akışının %70'inden fazlaysa "zorlu" olarak işaretle.
+4. Gerekli katkı, net nakit akışının %30-50 arasıysa "sürdürülebilir" olarak işaretle.
+5. Tarih yoksa net nakit akışının %30-50'si arasında güvenli katkı öner.
+6. Hedef yoksa "Kayıtlı hedef göremiyorum" de ve hedef oluşturmasını öner.
+
+JSON formatında yanıt ver:
 {
-  "summary": "özet",
-  "diagnosis": {"status": "good|warning|risk", "mainIssue": "...", "explanation": "..."},
-  "insights": [{"title": "...", "description": "...", "severity": "low|medium|high"}],
-  "recommendations": [{"title": "...", "action": "...", "estimatedImpact": "...", "difficulty": "easy|medium|hard"}],
-  "numbers": {"monthlyIncome": sayı, "requiredSavingForGoal": sayı},
-  "actionItems": [{"title": "...", "description": "...", "dueInDays": sayı, "priority": "low|medium|high"}],
+  "summary": "${noGoals
+    ? "Kayıtlı aktif hedef görünmüyor. Hedef oluşturmak için..."
+    : "Tüm hedefler için gerekli aylık katkı hesabını ve fizibilite yorumunu yaz (2-3 cümle)"}",
+  "diagnosis": {
+    "status": "${noGoals ? "warning" : data.netCashflow >= 0 ? "good" : "risk"}",
+    "mainIssue": "${noGoals ? "Aktif hedef yok" : "Hedef katkısı fizibilite analizi"}",
+    "explanation": "Her hedef için gerekli katkıyı ve sürdürülebilirlik değerlendirmesini yaz"
+  },
+  "insights": [
+    ${data.goals.slice(0, 3).map(g => {
+      const remaining = g.targetAmount - g.currentAmount;
+      const deadline = g.deadline ? new Date(g.deadline) : null;
+      const monthsLeft = deadline ? Math.max(1, Math.ceil((deadline.getTime() - today.getTime()) / (1000 * 60 * 60 * 24 * 30.44))) : null;
+      const monthlyNeeded = monthsLeft !== null ? remaining / monthsLeft : null;
+      return `{"title": "${g.title}", "description": "Kalan ${remaining.toFixed(0)} ${data.currency}${monthlyNeeded !== null ? ` — aylık ${monthlyNeeded.toFixed(0)} ${data.currency} gerekli (${monthsLeft} ay)` : " — tarih belirtilmemiş"}", "severity": "${monthlyNeeded !== null && monthlyNeeded > data.netCashflow ? "high" : monthlyNeeded !== null && monthlyNeeded > data.netCashflow * 0.5 ? "medium" : "low"}"}`;
+    }).join(",\n    ") || `{"title": "Hedef bulunamadı", "description": "Hedef eklemek için hedefler sayfasını kullan.", "severity": "medium"}`}
+  ],
+  "recommendations": [
+    {"title": "...", "action": "...", "estimatedImpact": "...", "difficulty": "easy|medium|hard"}
+  ],
+  "numbers": {
+    "monthlyIncome": ${data.monthlyIncome},
+    "monthlyExpense": ${data.monthlyExpenses},
+    "estimatedSaving": ${Math.max(data.netCashflow, 0)},
+    "requiredSavingForGoal": ${data.goals.length > 0 ? (() => {
+      const g = data.goals[0];
+      const remaining = g.targetAmount - g.currentAmount;
+      const deadline = g.deadline ? new Date(g.deadline) : null;
+      const monthsLeft = deadline ? Math.max(1, Math.ceil((deadline.getTime() - today.getTime()) / (1000 * 60 * 60 * 24 * 30.44))) : null;
+      return monthsLeft ? Math.ceil(remaining / monthsLeft) : Math.ceil(data.netCashflow * 0.4);
+    })() : 0}
+  },
+  "actionItems": [
+    {"title": "...", "description": "...", "dueInDays": sayı, "priority": "low|medium|high"}
+  ],
+  "followUps": ["Hedef tarihimi değiştirirsem ne olur?", "Bu katkıyı otomatik nasıl ayarlarım?", "3 aylık plan yap"],
   "disclaimer": "${DISCLAIMER}"
 }`;
   return { prompt, systemPrompt: GOAL_PLANNER_PROMPT };
@@ -843,8 +928,71 @@ export async function GoalPlannerAgent(
   goalId?: string
 ): Promise<AIResponse> {
   const { prompt, systemPrompt } = buildGoalPlannerPrompt(input, goalId);
-  const rawJson = await generateAIJSON<unknown>(prompt, systemPrompt);
-  return parseAndValidateResponse(rawJson);
+  try {
+    const rawJson = await generateAIJSON<unknown>(prompt, systemPrompt);
+    const parsed = AIResponseSchema.safeParse(rawJson);
+    if (parsed.success) return parsed.data;
+  } catch {
+    // fall through to prompt-based fallback
+  }
+  // Hedef bazlı kişisel fallback
+  const data = input.financialData;
+  const currency = data.currency;
+  const netCash = data.netCashflow;
+  const safeMonthly = Math.max(0, Math.round(netCash * 0.35));
+  const hasGoals = data.goals.length > 0;
+  return {
+    summary: hasGoals
+      ? `${data.goals.length} aktif hedefin var. Net nakit akışın ${netCash.toFixed(0)} ${currency} olduğu için aylık yaklaşık ${safeMonthly.toFixed(0)} ${currency} hedeflere ayırmak sürdürülebilir bir plan.`
+      : "Kayıtlı aktif hedef görünmüyor. Hedef oluşturmak için hedefler sayfasını kullanabilirsin.",
+    diagnosis: {
+      status: netCash >= 0 ? "good" : "warning",
+      mainIssue: hasGoals ? "Hedef katkısı fizibilite analizi" : "Aktif hedef yok",
+      explanation: hasGoals
+        ? `Net nakit akışın ${netCash.toFixed(0)} ${currency}. Bu akışın %30-50'sini hedeflere yönlendirmek sürdürülebilir bir plan oluşturur.`
+        : "Hedef eklersen her ay ne kadar ayırman gerektiğini otomatik hesaplayabilirim.",
+    },
+    insights: hasGoals
+      ? data.goals.slice(0, 3).map(g => {
+          const remaining = g.targetAmount - g.currentAmount;
+          return {
+            title: g.title,
+            description: `Kalan ${remaining.toFixed(0)} ${currency} — ilerleme %${g.progressPercent.toFixed(0)}`,
+            severity: g.progressPercent < 20 ? "high" as const : g.progressPercent < 60 ? "medium" as const : "low" as const,
+          };
+        })
+      : [{ title: "Hedef yok", description: "Tasarruf hedefi ekleyerek ilerlemeyi takip edebilirsin.", severity: "medium" as const }],
+    recommendations: [
+      {
+        title: "Aylık hedef katkısı belirle",
+        action: `Net nakit akışının %30-40'ını (yaklaşık ${safeMonthly.toFixed(0)} ${currency}) her ay otomatik olarak hedef hesabına aktar.`,
+        estimatedImpact: "Hedef ilerlemesi düzenli hale gelir.",
+        difficulty: "easy" as const,
+      },
+      {
+        title: "Öncelik sırası oluştur",
+        action: "Birden fazla hedef varsa en yakın tarihliye daha fazla katkı yap.",
+        estimatedImpact: "Hedeflere zamanında ulaşma olasılığı artar.",
+        difficulty: "easy" as const,
+      },
+    ],
+    numbers: {
+      monthlyIncome: data.monthlyIncome,
+      monthlyExpense: data.monthlyExpenses,
+      estimatedSaving: Math.max(netCash, 0),
+      requiredSavingForGoal: safeMonthly,
+    },
+    actionItems: [
+      {
+        title: "Hedef katkısını bu hafta ayarla",
+        description: `Aylık ${safeMonthly.toFixed(0)} ${currency} tutarını hedef hesabına aktarmak için otomatik plan kur.`,
+        dueInDays: 5,
+        priority: "high" as const,
+      },
+    ],
+    followUps: ["Hedef tarihimi değiştirirsem ne olur?", "En öncelikli hedefim hangisi?", "3 aylık plan yap"],
+    disclaimer: DISCLAIMER,
+  };
 }
 
 // ============================================================
@@ -871,8 +1019,69 @@ JSON formatında yanıt ver:
 
 export async function DebtRiskAgent(input: AgentInput): Promise<AIResponse> {
   const { prompt, systemPrompt } = buildDebtRiskPrompt(input);
-  const rawJson = await generateAIJSON<unknown>(prompt, systemPrompt);
-  return parseAndValidateResponse(rawJson);
+  try {
+    const rawJson = await generateAIJSON<unknown>(prompt, systemPrompt);
+    const parsed = AIResponseSchema.safeParse(rawJson);
+    if (parsed.success) return parsed.data;
+  } catch {
+    // fall through to debt-specific fallback
+  }
+  const data = input.financialData;
+  const currency = data.currency;
+  const hasDebts = data.debts.length > 0;
+  const totalRemaining = data.debts.reduce((s, d) => s + d.remainingAmount, 0);
+  const totalMinimum = data.debts.reduce((s, d) => s + d.minimumPayment, 0);
+  return {
+    summary: hasDebts
+      ? `${data.debts.length} aktif borç var. Toplam kalan tutar ${totalRemaining.toFixed(0)} ${currency}, aylık minimum ödeme ${totalMinimum.toFixed(0)} ${currency}. Borç yükü oranı %${data.debtLoadRatio.toFixed(1)}.`
+      : "Kayıtlı aktif borç görünmüyor. Bu, borç kontrolü açısından güçlü bir durum.",
+    diagnosis: {
+      status: data.debtLoadRatio > 35 ? "risk" : data.debtLoadRatio > 20 ? "warning" : "good",
+      mainIssue: hasDebts ? "Borç yükü analizi" : "Aktif borç yok",
+      explanation: hasDebts
+        ? `${data.debts.length} aktif borç, toplam ${totalRemaining.toFixed(0)} ${currency}. Borç yükü oranı %${data.debtLoadRatio.toFixed(1)} — gelirin %${data.debtLoadRatio.toFixed(1)}'i borç ödemesine gidiyor.`
+        : "Aktif borç kaydı olmadığı için aylık borç ödeme baskısı görünmüyor. Varsa kredi kartı veya taksit kayıtlarını eklemek analizi daha doğru yapar.",
+    },
+    insights: hasDebts
+      ? data.debts.slice(0, 3).map(d => ({
+          title: d.title,
+          description: `Kalan ${d.remainingAmount.toFixed(0)} ${currency}, minimum ödeme ${d.minimumPayment.toFixed(0)} ${currency}, faiz %${d.interestRate}.`,
+          severity: d.interestRate > 20 ? "high" as const : d.interestRate > 10 ? "medium" as const : "low" as const,
+        }))
+      : [{ title: "Borç kontrolü güçlü", description: "Aktif borç kaydı olmadığı için aylık borç ödeme baskısı görünmüyor.", severity: "low" as const }],
+    recommendations: [
+      {
+        title: hasDebts ? "Yüksek faizli borcu önce kapat" : "Borç kayıtlarını güncel tut",
+        action: hasDebts
+          ? `En yüksek faizli borcu önce kapatmak için bu ay ekstra ${Math.min(Math.round(data.netCashflow * 0.2), 2000).toFixed(0)} ${currency} ayır.`
+          : "Kredi kartı, taksit veya elden borç varsa borçlar sayfasına ekle.",
+        estimatedImpact: hasDebts ? "Faiz maliyeti azalır." : "Borç analizi daha doğru olur.",
+        difficulty: "medium" as const,
+      },
+      {
+        title: "Minimum ödeme otomasyonu",
+        action: "Tüm borçların minimum ödemelerini otomatik ödeme planına al.",
+        estimatedImpact: "Gecikme ve ceza faizi riski ortadan kalkar.",
+        difficulty: "easy" as const,
+      },
+    ],
+    numbers: {
+      monthlyIncome: data.monthlyIncome,
+      debtLoadRatio: data.debtLoadRatio,
+    },
+    actionItems: [
+      {
+        title: hasDebts ? "Borç listesini güncelle" : "Borç takibini başlat",
+        description: hasDebts
+          ? "Kalan tutar ve minimum ödeme değiştikçe borç kaydını güncelle."
+          : "Gelecekte borç alırsan hemen kaydet; takip kolaylaşır.",
+        dueInDays: 7,
+        priority: "medium" as const,
+      },
+    ],
+    followUps: ["Borcumu nasıl kapatabilirim?", "Finansal sağlık skorumu göster", "3 aylık plan yap"],
+    disclaimer: DISCLAIMER,
+  };
 }
 
 // ============================================================
@@ -1412,4 +1621,414 @@ export async function ExplanationAgent(
   const { prompt, systemPrompt } = buildExplanationPrompt(userMessage, context);
   const rawJson = await generateAIJSON<unknown>(prompt, systemPrompt);
   return parseAndValidateResponse(rawJson);
+}
+
+// ============================================================
+// INCOME-EXPENSE BALANCE AGENT
+// ============================================================
+export function buildIncomeExpenseBalancePrompt(input: AgentInput): { prompt: string; systemPrompt: string } {
+  const ctx = input.financialData;
+  const contextStr = buildContextString(ctx);
+  const userQuery = input.userMessage ?? "Gelir ve gider dengemi yorumla.";
+  const cashflowStatus = ctx.netCashflow > 0 ? "pozitif" : ctx.netCashflow < 0 ? "negatif" : "sıfır";
+  const savingRateLabel = ctx.savingRate >= 20 ? "iyi" : ctx.savingRate >= 10 ? "orta" : "düşük";
+  const topCat = ctx.topExpenseCategories[0];
+
+  const prompt = `${contextStr}
+
+KULLANICI SORUSU: ${userQuery}
+
+HESAPLANAN KRİTİK METRİKLER — bu sayılara kesinlikle sadık kal:
+- Aylık Gelir: ${ctx.monthlyIncome.toFixed(0)} ${ctx.currency}
+- Aylık Gider: ${ctx.monthlyExpenses.toFixed(0)} ${ctx.currency}
+- Net Nakit Akışı: ${ctx.netCashflow.toFixed(0)} ${ctx.currency} → Bu değer ${cashflowStatus}; gelir > gider${ctx.netCashflow >= 0 ? " olduğundan pozitif" : " olmadığından negatif"}.
+- Tasarruf Oranı: %${ctx.savingRate.toFixed(1)} (${savingRateLabel} seviye)
+- En Büyük Gider: ${topCat ? `${topCat.categoryName} — ${topCat.amount.toFixed(0)} ${ctx.currency} (toplam giderin %${topCat.percent.toFixed(1)}'i)` : "veri yok"}
+
+ÖNEMLİ YORUM KURALI:
+- Nakit akışı ${ctx.netCashflow >= 0 ? "pozitif" : "negatif"}. Asla bu gerçekle çelişen bir cümle kullanma.
+- ${ctx.netCashflow > 0 ? "\"Nakit akışı zorlanıyor\", \"bütçe sıkışık\" gibi YANLIŞ ifadeler KULLANMA." : "Giderler geliri aşıyor; bunu dürüstçe ifade et."}
+- Tasarruf oranı %${ctx.savingRate.toFixed(1)} → ${savingRateLabel === "iyi" ? "güçlü bir birikim oranı, bunu olumlu vurgula." : savingRateLabel === "orta" ? "orta seviye; iyileştirme için yer var." : "düşük; gider azaltma veya gelir artırma gerekiyor."}
+
+JSON formatında yanıt ver:
+{
+  "summary": "Gelir-gider dengesi, tasarruf oranı ve nakit akışının doğru yorumu (2-3 cümle, sayıları kullan)",
+  "diagnosis": {
+    "status": "${ctx.netCashflow >= 0 && ctx.savingRate >= 10 ? "good" : ctx.netCashflow >= 0 ? "warning" : "risk"}",
+    "mainIssue": "Ana gözlem",
+    "explanation": "Detaylı yorum (4-6 cümle, tasarruf oranı + en büyük gider + bütçe esnekliği)"
+  },
+  "insights": [
+    {"title": "Net Nakit Akışı", "description": "...", "severity": "${ctx.netCashflow >= 0 ? "low" : "high"}"},
+    {"title": "Tasarruf Oranı", "description": "...", "severity": "${ctx.savingRate >= 20 ? "low" : ctx.savingRate >= 10 ? "medium" : "high"}"},
+    {"title": "Gider Yükü", "description": "...", "severity": "${topCat && topCat.percent >= 50 ? "high" : "medium"}"}
+  ],
+  "recommendations": [
+    {"title": "...", "action": "...", "estimatedImpact": "...", "difficulty": "easy|medium|hard"}
+  ],
+  "numbers": {
+    "monthlyIncome": ${ctx.monthlyIncome},
+    "monthlyExpense": ${ctx.monthlyExpenses},
+    "estimatedSaving": ${Math.max(ctx.netCashflow, 0)}
+  },
+  "actionItems": [
+    {"title": "...", "description": "...", "dueInDays": 7, "priority": "high|medium|low"}
+  ],
+  "followUps": ["Bunu tabloyla göster", "En riskli giderim hangisi?", "Tasarruf oranımı nasıl artırırım?"],
+  "disclaimer": "${DISCLAIMER}"
+}`;
+
+  return { prompt, systemPrompt: INCOME_EXPENSE_BALANCE_PROMPT };
+}
+
+// ============================================================
+// TABLE FORMAT AGENT
+// ============================================================
+export function buildTableFormatPrompt(input: AgentInput, ctx?: ConversationContext): { prompt: string; systemPrompt: string } {
+  const data = input.financialData;
+  const currency = data.currency;
+  const prevContent = ctx?.lastAssistantContent ?? "";
+  const prevMeta = ctx?.lastAssistantMetadata;
+  const topCat = data.topExpenseCategories[0];
+
+  const incomeVal = prevMeta?.numbers?.monthlyIncome ?? data.monthlyIncome;
+  const expenseVal = prevMeta?.numbers?.monthlyExpense ?? data.monthlyExpenses;
+  const netCash = data.netCashflow;
+  const savRate = data.savingRate;
+  const cashStatus = netCash >= 0 ? "Pozitif ✓" : "Negatif ✗";
+  const savStatus = savRate >= 20 ? "İyi ✓" : savRate >= 10 ? "Orta ↗" : "Düşük ✗";
+
+  const prompt = `${buildContextString(data)}
+
+KULLANICI SORUSU: ${input.userMessage ?? "Bunu tabloyla göster"}
+
+${prevContent ? `ÖNCEKİ CEVAP:\n${prevContent}` : "Önceki cevap yok — mevcut finansal verilerden tablo oluştur."}
+
+GÖREV: Önceki analizin veya mevcut finansal verilerin en önemli noktalarını Markdown tablosuna çevir.
+summary alanına YALNIZCA Markdown tablosunu yaz (açıklama ekleme):
+
+Örnek format (bu veriyle doldur):
+| Alan | Değer | Durum |
+|------|-------|-------|
+| Aylık Gelir | ${new Intl.NumberFormat("tr-TR").format(Math.round(incomeVal))} ${currency} | Güçlü |
+| Aylık Gider | ${new Intl.NumberFormat("tr-TR").format(Math.round(expenseVal))} ${currency} | ${expenseVal / incomeVal > 0.8 ? "Yüksek ↗" : "Kontrollü ✓"} |
+| Net Nakit Akışı | ${new Intl.NumberFormat("tr-TR").format(Math.round(netCash))} ${currency} | ${cashStatus} |
+| Tasarruf Oranı | %${savRate.toFixed(1)} | ${savStatus} |${topCat ? `\n| En Riskli Gider | ${topCat.categoryName} (%${topCat.percent.toFixed(1)}) | Dikkat ↗ |` : ""}
+
+JSON formatında yanıt ver:
+{
+  "summary": "| Alan | Değer | Durum |\\n|------|-------|-------|\\n| Aylık Gelir | ... | ... |\\n... (tüm satırları doldur)",
+  "diagnosis": {
+    "status": "${netCash >= 0 ? "good" : "risk"}",
+    "mainIssue": "Tablonun öne çıkan noktası",
+    "explanation": "Tabloyu yorumla (2-3 cümle, tablodaki verilere dayan)"
+  },
+  "insights": [
+    {"title": "Tablonun Özeti", "description": "...", "severity": "low|medium|high"}
+  ],
+  "recommendations": [
+    {"title": "...", "action": "...", "difficulty": "easy|medium|hard"}
+  ],
+  "numbers": {
+    "monthlyIncome": ${incomeVal},
+    "monthlyExpense": ${expenseVal},
+    "estimatedSaving": ${Math.max(netCash, 0)}
+  },
+  "actionItems": [],
+  "followUps": ["3 aylık plan yap", "En riskli gideri azaltmak için plan", "Tasarruf oranımı nasıl artırırım?"],
+  "disclaimer": "${DISCLAIMER}"
+}`;
+
+  return { prompt, systemPrompt: TABLE_FORMAT_PROMPT };
+}
+
+// ============================================================
+// EXPLAIN PREVIOUS AGENT
+// ============================================================
+export function buildExplainPreviousPrompt(input: AgentInput, ctx?: ConversationContext): { prompt: string; systemPrompt: string } {
+  const data = input.financialData;
+  const prevContent = ctx?.lastAssistantContent ?? "";
+  const prevInsights = ctx?.lastAssistantMetadata?.insights ?? [];
+  const prevDiagnosis = ctx?.lastAssistantMetadata?.diagnosis;
+  const insightSummary = prevInsights.slice(0, 3).map(i => `- ${i.title}: ${i.description}`).join("\n");
+
+  const userQuery = input.userMessage ?? "Bunu daha detaylı açıkla";
+  const wantsStrengthsWeaknesses = /güçlü.*zayıf|güçlü ve zayıf|zayıf.*güçlü|ayrı ayrı açıkla|güçlü taraf|zayıf taraf/i.test(userQuery);
+
+  const prompt = `${buildContextString(data)}
+
+KULLANICI SORUSU: ${userQuery}
+
+ÖNCEKİ CEVAP:
+${prevContent || "Önceki cevap bulunamadı; mevcut finansal verilerden genel değerlendirme yap."}
+
+${insightSummary ? `ÖNCEKİ ANALİZİN NOKTALARI:\n${insightSummary}` : ""}
+${prevDiagnosis ? `ÖNCEKİ TANI: ${prevDiagnosis.mainIssue} — ${prevDiagnosis.explanation}` : ""}
+
+GÖREV: Yukarıdaki önceki cevabı GENIŞLET ve DERINLEŞTIR.
+- Aynı şeyi farklı kelimelerle tekrar ETME
+- Yeni perspektifler, bağlantılar ve somut sayılar ekle
+${wantsStrengthsWeaknesses ? `- insights alanına TAM 3 madde yaz: "Güçlü Taraflar", "Zayıf / Riskli Taraflar", "Ne Yapılmalı"
+- Her insight description alanına somut sayılar ve oranlar içeren 2-3 cümle yaz` : ""}
+
+JSON formatında yanıt ver:
+{
+  "summary": "${wantsStrengthsWeaknesses
+    ? "Önceki analiz güçlü ve zayıf yönler açısından değerlendirildi. [1-2 cümle ile genel tablo özetle, sayı kullan]"
+    : "Önceki analizin derinleştirilmiş özeti (2-3 cümle, yeni perspektifle ve somut sayılarla)"}",
+  "diagnosis": {
+    "status": "${data.netCashflow >= 0 ? "good" : "risk"}",
+    "mainIssue": "Önceki analizin ana konusunun daha net ifadesi",
+    "explanation": "Detaylı açıklama (5-8 cümle, yeni bilgi ekle, tekrar etme)"
+  },
+  "insights": [
+    ${wantsStrengthsWeaknesses
+      ? `{"title": "Güçlü Taraflar", "description": "[borç durumu, tasarruf oranı, nakit akışı — somut sayılarla 2 cümle]", "severity": "low"},
+    {"title": "Zayıf / Riskli Taraflar", "description": "[en yüksek gider kategorisi, oranı, bütçe esnekliği — somut sayılarla 2 cümle]", "severity": "high"},
+    {"title": "Ne Yapılmalı", "description": "[öncelikli 2-3 somut adım ve beklenen etkisi]", "severity": "medium"}`
+      : `{"title": "...", "description": "...", "severity": "low|medium|high"}`}
+  ],
+  "recommendations": [
+    {"title": "...", "action": "...", "estimatedImpact": "...", "difficulty": "easy|medium|hard"}
+  ],
+  "numbers": {
+    "monthlyIncome": ${data.monthlyIncome},
+    "monthlyExpense": ${data.monthlyExpenses},
+    "estimatedSaving": ${Math.max(data.netCashflow, 0)}
+  },
+  "actionItems": [
+    {"title": "...", "description": "...", "dueInDays": 7, "priority": "high|medium|low"}
+  ],
+  "followUps": ["Bunu tabloyla göster", "3 aylık plan yap", "Hangi adımı önce atmalıyım?"],
+  "disclaimer": "${DISCLAIMER}"
+}`;
+
+  return { prompt, systemPrompt: EXPLAIN_PREVIOUS_PROMPT };
+}
+
+// ============================================================
+// MONTHLY ACTION PLAN AGENT
+// ============================================================
+export function buildMonthlyActionPlanPrompt(input: AgentInput): { prompt: string; systemPrompt: string } {
+  const ctx = input.financialData;
+  const contextStr = buildContextString(ctx);
+  const userQuery = input.userMessage ?? "3 aylık finansal plan yap.";
+  const topCat = ctx.topExpenseCategories[0];
+  const netCash = ctx.netCashflow;
+
+  const prompt = `${contextStr}
+
+KULLANICI SORUSU: ${userQuery}
+
+MEVCUT FİNANSAL DURUM ÖZETİ:
+- Gelir: ${ctx.monthlyIncome.toFixed(0)} ${ctx.currency} / ay
+- Gider: ${ctx.monthlyExpenses.toFixed(0)} ${ctx.currency} / ay
+- Net Nakit Akışı: ${netCash.toFixed(0)} ${ctx.currency} / ay
+- Tasarruf Oranı: %${ctx.savingRate.toFixed(1)}
+${topCat ? `- En Büyük Gider: ${topCat.categoryName} (${topCat.amount.toFixed(0)} ${ctx.currency}, %${topCat.percent.toFixed(1)})` : ""}
+${ctx.goals.length > 0 ? `- Aktif Hedefler: ${ctx.goals.map(g => `${g.title} (%${g.progressPercent.toFixed(0)} tamamlandı)`).join(", ")}` : "- Aktif hedef yok"}
+${ctx.debts.length > 0 ? `- Aktif Borçlar: ${ctx.debts.map(d => d.title).join(", ")}` : ""}
+
+GÖREV: 3 aylık somut finansal eylem planı oluştur.
+- summary alanına 2-3 cümle genel özet yaz (plain text, markdown YOK)
+- insights alanında her insight bir ay olsun (Ay 1, Ay 2, Ay 3) — title kısa, description 1-2 cümle
+- actionItems alanında her item bir aya ait olsun (dueInDays: 30, 60, 90)
+
+JSON formatında yanıt ver:
+{
+  "summary": "3 aylık plan hazırlandı. [Genel hedefi ve beklenen toplam etkiyi 2 cümleyle özetle]",
+  "diagnosis": {
+    "status": "${netCash >= 0 ? "good" : "warning"}",
+    "mainIssue": "3 aylık sürecin öncelikli konusu",
+    "explanation": "Plan boyunca neler değişecek ve neden bu sırayla"
+  },
+  "insights": [
+    {"title": "Ay 1 — [kısa başlık, örn: Gider Azaltma]", "description": "Ana aksiyon ve beklenen etki (1-2 cümle, tutar veya % ver)", "severity": "high"},
+    {"title": "Ay 2 — [kısa başlık, örn: Optimizasyon]", "description": "Ana aksiyon ve beklenen etki (1-2 cümle, tutar veya % ver)", "severity": "medium"},
+    {"title": "Ay 3 — [kısa başlık, örn: Otomatikleştir]", "description": "Ana aksiyon ve beklenen etki (1-2 cümle, tutar veya % ver)", "severity": "low"}
+  ],
+  "recommendations": [
+    {"title": "...", "action": "...", "estimatedImpact": "...", "difficulty": "easy|medium|hard"}
+  ],
+  "numbers": {
+    "monthlyIncome": ${ctx.monthlyIncome},
+    "monthlyExpense": ${ctx.monthlyExpenses},
+    "estimatedSaving": ${Math.max(netCash, 0)}
+  },
+  "actionItems": [
+    {"title": "Ay 1 — [kısa görev adı]", "description": "Somut adım ve ölçüm kriteri (tek cümle)", "dueInDays": 30, "priority": "high"},
+    {"title": "Ay 2 — [kısa görev adı]", "description": "Somut adım ve ölçüm kriteri (tek cümle)", "dueInDays": 60, "priority": "medium"},
+    {"title": "Ay 3 — [kısa görev adı]", "description": "Somut adım ve ölçüm kriteri (tek cümle)", "dueInDays": 90, "priority": "medium"}
+  ],
+  "followUps": ["İlk ay ne kadar tasarruf beklemeliyim?", "Bu planı nasıl takip ederim?", "Hedef katkısı ne olmalı?"],
+  "disclaimer": "${DISCLAIMER}"
+}`;
+
+  return { prompt, systemPrompt: MONTHLY_ACTION_PLAN_PROMPT };
+}
+
+// ============================================================
+// BUDGET OVERRUN AGENT
+// ============================================================
+export function buildBudgetOverrunPrompt(input: AgentInput): { prompt: string; systemPrompt: string } {
+  const ctx = input.financialData;
+  const contextStr = buildContextString(ctx);
+  const userQuery = input.userMessage ?? "Bütçemde aşım var mı?";
+
+  const prompt = `${contextStr}
+
+KULLANICI SORUSU: ${userQuery}
+
+ÖNEMLİ KURAL — bu kurala kesinlikle uy:
+Yukarıdaki finansal verilerde kayıtlı bütçe limiti (kategori bazında üst sınır) yoksa bunu açıkça söyle.
+Sadece gider kategorileri var; bu kategorilere bakarak YALNIZCA en yüksek harcama alanını belirt.
+"Bütçe aştın" demek için kayıtlı limit gerekir — limit yoksa bu uyarıyı kullan:
+"Şu anda kayıtlı bütçe limiti göremiyorum. Gider verilerine göre en yüksek kategori [kategori]; ancak bütçe aşımı diyebilmem için kategori limitlerinin tanımlı olması gerekir."
+
+MEVCUT GİDER KATEGORİLERİ:
+${ctx.topExpenseCategories.map(c => `- ${c.categoryName}: ${c.amount.toFixed(0)} ${ctx.currency} (%${c.percent.toFixed(1)})`).join("\n") || "- Gider kategorisi kaydı yok"}
+
+JSON formatında yanıt ver:
+{
+  "summary": "Bütçe aşımı durumunu özetle. Limit yoksa açıkça belirt (örnek cümleyi kullan).",
+  "diagnosis": {
+    "status": "good|warning|risk",
+    "mainIssue": "Bütçe limiti yok veya aşım tespiti",
+    "explanation": "Detaylı yorum — gider verilerine göre ne söylenebilir"
+  },
+  "insights": [
+    {"title": "En Yüksek Gider Kategorisi", "description": "...", "severity": "medium|high"}
+  ],
+  "recommendations": [
+    {"title": "Kategori bazında bütçe limiti tanımla", "action": "Her kategori için aylık üst limit belirle; bu sayede gerçek aşımlar otomatik görünür hale gelir.", "difficulty": "easy"}
+  ],
+  "numbers": {
+    "monthlyIncome": ${ctx.monthlyIncome},
+    "monthlyExpense": ${ctx.monthlyExpenses}
+  },
+  "actionItems": [
+    {"title": "Bütçe limiti ekle", "description": "Uygulama üzerinden her kategori için aylık üst limit tanımla.", "dueInDays": 3, "priority": "medium"}
+  ],
+  "followUps": ["Bütçe limiti nasıl ayarlarım?", "En yüksek gideri azaltmak için ne yapmalıyım?", "3 aylık plan yap"],
+  "disclaimer": "${DISCLAIMER}"
+}`;
+
+  return { prompt, systemPrompt: BUDGET_OVERRUN_PROMPT };
+}
+
+// ============================================================
+// BUDGET PLANNER PROMPT (AIResponse format — for direct budget questions)
+// ============================================================
+export function buildBudgetPlannerPrompt(input: AgentInput): { prompt: string; systemPrompt: string } {
+  const ctx = input.financialData;
+  const contextStr = buildContextString(ctx);
+  const userQuery = input.userMessage ?? "Bütçemi nasıl planlamalıyım?";
+  const topCat = ctx.topExpenseCategories[0];
+  const netCash = ctx.netCashflow;
+  const status = netCash >= 0 && ctx.savingRate >= 10 ? "good" : netCash >= 0 ? "warning" : "risk";
+
+  const prompt = `${contextStr}
+
+KULLANICI SORUSU: ${userQuery}
+
+KRİTİK METRİKLER:
+- Aylık Gelir: ${ctx.monthlyIncome.toFixed(0)} ${ctx.currency}
+- Aylık Gider: ${ctx.monthlyExpenses.toFixed(0)} ${ctx.currency}
+- Net Nakit Akışı: ${netCash.toFixed(0)} ${ctx.currency}
+- Tasarruf Oranı: %${ctx.savingRate.toFixed(1)}
+${topCat ? `- En Büyük Gider: ${topCat.categoryName} — ${topCat.amount.toFixed(0)} ${ctx.currency} (%${topCat.percent.toFixed(1)})` : ""}
+
+GÖREV: Kullanıcının gerçek gelir ve gider verilerine dayalı aylık bütçe planı oluştur.
+- Mevcut harcama kategorilerine bak ve kısılabilecek alanları somut tutarlarla belirt.
+- Önerilen tasarruf hedefini belirle (net nakit akışının %20-30'u mantıklı başlangıç).
+- Kategori limit önerilerini mevcut harcamaya göre yap (uydurma).
+
+JSON formatında yanıt ver:
+{
+  "summary": "Gelir/gider verisine dayalı bütçe planı özeti (2-3 cümle, gelir ve gider tutarlarını say)",
+  "diagnosis": {
+    "status": "${status}",
+    "mainIssue": "Bütçenin öncelikli konusu (tek cümle)",
+    "explanation": "Detaylı bütçe değerlendirmesi (4-6 cümle, mevcut harcama dağılımına bak)"
+  },
+  "insights": [
+    {"title": "Önerilen Tasarruf Hedefi", "description": "Aylık ${Math.round(netCash * 0.25)} ${ctx.currency} (net nakit akışının ~%25'i) hedef olarak başlangıç için makul. [Detay ekle]", "severity": "${netCash > 0 ? "low" : "high"}"},
+    {"title": "Kısılabilecek Alan", "description": "${topCat ? topCat.categoryName + " kategorisi " + topCat.amount.toFixed(0) + " " + ctx.currency + " ile en büyük gider kalemi. [Azaltma önerisi ekle]" : "Harcama kategorisi verisi kısıtlı. [Genel öneri ekle]"}", "severity": "medium"},
+    {"title": "Bütçe Dengesi", "description": "[Gelir-gider dengesini ve iyileştirme potansiyelini yorumla]", "severity": "${status === "risk" ? "high" : "medium"}"}
+  ],
+  "recommendations": [
+    {"title": "...", "action": "...", "estimatedImpact": "...", "difficulty": "easy|medium|hard"}
+  ],
+  "numbers": {
+    "monthlyIncome": ${ctx.monthlyIncome},
+    "monthlyExpense": ${ctx.monthlyExpenses},
+    "estimatedSaving": ${Math.max(netCash, 0)}
+  },
+  "actionItems": [
+    {"title": "...", "description": "...", "dueInDays": 7, "priority": "high|medium|low"}
+  ],
+  "followUps": ["Bu bütçeyi nasıl takip ederim?", "Hangi kategoride daha az harcamalıyım?", "3 aylık plan yap"],
+  "disclaimer": "${DISCLAIMER}"
+}`;
+
+  return { prompt, systemPrompt: BUDGET_PLANNER_PROMPT };
+}
+
+// ============================================================
+// DEBT ANALYSIS AGENT (detailed priority)
+// ============================================================
+export function buildDebtAnalysisPrompt(input: AgentInput): { prompt: string; systemPrompt: string } {
+  const ctx = input.financialData;
+  const contextStr = buildContextString(ctx);
+  const userQuery = input.userMessage ?? "Borç durumumu analiz et ve öncelik sırası öner.";
+
+  const hasDebts = ctx.debts.length > 0;
+  const sortedByInterest = [...ctx.debts].sort((a, b) => b.interestRate - a.interestRate);
+  const sortedByAmount = [...ctx.debts].sort((a, b) => a.remainingAmount - b.remainingAmount);
+
+  const prompt = `${contextStr}
+
+KULLANICI SORUSU: ${userQuery}
+
+${hasDebts
+  ? `BORÇ ÖNCELİK ANALİZİ:
+Çığ Yöntemi (en yüksek faizden başla):
+${sortedByInterest.map((d, i) => `${i + 1}. ${d.title}: %${d.interestRate} faiz, ${d.remainingAmount.toFixed(0)} ${ctx.currency} kalan`).join("\n")}
+
+Kartopu Yöntemi (en küçük borçtan başla):
+${sortedByAmount.map((d, i) => `${i + 1}. ${d.title}: ${d.remainingAmount.toFixed(0)} ${ctx.currency} kalan, %${d.interestRate} faiz`).join("\n")}
+
+Toplam Borç Yükü: %${ctx.debtLoadRatio.toFixed(1)} (gelirin)
+Aylık Minimum Ödeme Toplamı: ${ctx.debts.reduce((s, d) => s + d.minimumPayment, 0).toFixed(0)} ${ctx.currency}`
+  : "BORÇ DURUMU: Kayıtlı aktif borç bulunmuyor."}
+
+GÖREV: Borç durumunu analiz et, öncelik sırası öner, iki yöntemi karşılaştır.
+${!hasDebts ? "Borç yoksa bunu pozitif bir durum olarak vurgula ve borcun oluşmaması için öneriler sun." : ""}
+
+JSON formatında yanıt ver:
+{
+  "summary": "${hasDebts ? "Borçları faiz/tutar bazında önceliklendir" : "Aktif borç yoksa net söyle, güçlü bir finansal durum olduğunu vurgula"}",
+  "diagnosis": {
+    "status": "${ctx.debtLoadRatio > 35 ? "risk" : ctx.debtLoadRatio > 20 ? "warning" : "good"}",
+    "mainIssue": "Borç yükü veya borç yokluğu",
+    "explanation": "Detaylı analiz"
+  },
+  "insights": [
+    {"title": "...", "description": "...", "severity": "low|medium|high"}
+  ],
+  "recommendations": [
+    {"title": "...", "action": "...", "estimatedImpact": "...", "difficulty": "easy|medium|hard"}
+  ],
+  "numbers": {
+    "monthlyIncome": ${ctx.monthlyIncome},
+    "debtLoadRatio": ${ctx.debtLoadRatio}
+  },
+  "actionItems": [
+    {"title": "...", "description": "...", "dueInDays": 7, "priority": "high|medium|low"}
+  ],
+  "followUps": ["3 aylık borç kapatma planı yap", "Finansal sağlık skorumu göster", "Bu ay ne kadar tasarruf ettim?"],
+  "disclaimer": "${DISCLAIMER}"
+}`;
+
+  return { prompt, systemPrompt: DEBT_ANALYSIS_PROMPT };
 }

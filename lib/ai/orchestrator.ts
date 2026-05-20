@@ -1,7 +1,7 @@
 // AI Orchestrator - Kullanıcı mesajını analiz eder, doğru agent'ı seçer ve çağırır.
 
 import { prisma } from "@/lib/prisma";
-import { generateAIResponse, streamAIJSONChunks, cleanJSONText } from "./provider";
+import { generateAIResponse, generateAIJSON, streamAIJSONChunks, cleanJSONText } from "./provider";
 import { ORCHESTRATOR_INTENT_PROMPT } from "./prompts";
 import {
   SpendingAnalysisAgent,
@@ -21,8 +21,16 @@ import {
   buildFinancialHealthFallbackResponse,
   buildActionPlanPrompt,
   buildExplanationPrompt,
+  buildIncomeExpenseBalancePrompt,
+  buildTableFormatPrompt,
+  buildExplainPreviousPrompt,
+  buildMonthlyActionPlanPrompt,
+  buildBudgetOverrunPrompt,
+  buildBudgetPlannerPrompt,
+  buildDebtAnalysisPrompt,
   type AgentInput,
   type FinancialContext,
+  type ConversationContext,
 } from "./agents";
 import {
   AIResponseSchema,
@@ -50,6 +58,60 @@ export type AgentType =
   | "ActionPlanAgent"
   | "ReportAgent"
   | "ExplanationAgent";
+
+type ExtendedIntent =
+  | AgentType
+  | "income_expense_balance"
+  | "table_format"
+  | "explain_previous"
+  | "monthly_action_plan"
+  | "budget_overrun"
+  | "spending_risk"
+  | "debt_analysis";
+
+function intentToAgentType(intent: ExtendedIntent): AgentType {
+  const overrides: Partial<Record<ExtendedIntent, AgentType>> = {
+    income_expense_balance: "SpendingAnalysisAgent",
+    table_format: "ReportAgent",
+    explain_previous: "ExplanationAgent",
+    monthly_action_plan: "ActionPlanAgent",
+    budget_overrun: "BudgetPlannerAgent",
+    spending_risk: "SpendingAnalysisAgent",
+    debt_analysis: "DebtRiskAgent",
+  };
+  return overrides[intent] ?? (intent as AgentType);
+}
+
+async function loadConversationContext(conversationId: string): Promise<ConversationContext> {
+  const rawMessages = await prisma.aIMessage.findMany({
+    where: { conversationId },
+    orderBy: { createdAt: "desc" },
+    take: 6,
+    select: { role: true, content: true, metadataJson: true },
+  });
+
+  // Reverse to restore chronological order after desc fetch
+  const messages = [...rawMessages].reverse();
+
+  const recentHistory = messages.map(m => ({
+    role: m.role as "USER" | "ASSISTANT",
+    content: m.content.slice(0, 800),
+  }));
+
+  const lastAssistant = [...messages].reverse().find(m => m.role === "ASSISTANT");
+  let lastAssistantMetadata: import("./schemas").AIResponse | null = null;
+  if (lastAssistant?.metadataJson) {
+    try {
+      lastAssistantMetadata = JSON.parse(lastAssistant.metadataJson) as import("./schemas").AIResponse;
+    } catch { /* ignore */ }
+  }
+
+  return {
+    lastAssistantContent: lastAssistant?.content ?? "",
+    lastAssistantMetadata,
+    recentHistory,
+  };
+}
 
 function isSimpleGreeting(message: string): boolean {
   const greetings = ["merhaba", "selam", "hey", "hi", "hello", "naber", "nasılsın", "iyi günler", "günaydın", "iyi akşamlar", "sa ", "as ", "selamlar"];
@@ -140,131 +202,160 @@ function extractRequestedItemCount(message?: string): number | null {
   return null;
 }
 
-async function detectIntent(userMessage: string): Promise<AgentType> {
-  const directMessage = userMessage.toLowerCase();
-  if (isTableRequest(userMessage)) {
-    return "ReportAgent";
+async function detectIntent(
+  userMessage: string,
+  conversationCtx?: ConversationContext,
+): Promise<ExtendedIntent> {
+  const norm = normalizeIntentText(userMessage);
+  const hasHistory = (conversationCtx?.recentHistory.length ?? 0) > 0;
+
+  // 1. Tablo formatı isteği (en yüksek öncelik — format isteği, konu değil)
+  if (norm.includes("tablo") || norm.includes("table")) {
+    return "table_format";
   }
-  const normalizedMessage = normalizeIntentText(userMessage);
+
+  // 2. Önceki cevabı açıkla / detaylandır (bağlam gerektiriyor)
+  if (hasHistory && (
+    /\bbunu\b/.test(norm) && (norm.includes("acikla") || norm.includes("detayla") || norm.includes("genislet") || norm.includes("anlat") || norm.includes("goster")) ||
+    norm.includes("son konustugumuz") ||
+    norm.includes("detaylandir") ||
+    norm.includes("neden boyle") ||
+    norm.includes("guclu ve zayif") ||
+    norm.includes("guclu zayif") ||
+    (norm.includes("daha") && (norm.includes("detayli") || norm.includes("acikla") || norm.includes("anlatir")))
+  )) {
+    return "explain_previous";
+  }
+
+  // 3. Aylık plan / 3 aylık plan (haftalık ActionPlanAgent'tan önce kontrol et)
   if (
-    normalizedMessage.includes("harcama") ||
-    normalizedMessage.includes("harcadim") ||
-    normalizedMessage.includes("gider") ||
-    normalizedMessage.includes("masraf") ||
-    normalizedMessage.includes("market") ||
-    normalizedMessage.includes("alisveris") ||
-    normalizedMessage.includes("azalt") ||
-    normalizedMessage.includes("dusur") ||
-    normalizedMessage.includes("kis") ||
-    normalizedMessage.includes("nereye")
+    /3\s*aylik|uc\s*aylik|3\s*ay(lik)?\s*(plan|icin|boyunca)/.test(norm) ||
+    /aylik\s*(plan|aksiyon)/.test(norm) ||
+    norm.includes("ay 1") || norm.includes("ay 2") || norm.includes("ay 3")
   ) {
-    return "SpendingAnalysisAgent";
+    return "monthly_action_plan";
   }
+
+  // 4. Gelir-Gider dengesi (SpendingAgent'tan önce — her ikisi birden geçiyorsa denge sorusu)
   if (
-    normalizedMessage.includes("skor") ||
-    normalizedMessage.includes("saglik") ||
-    normalizedMessage.includes("finansal durum")
+    (norm.includes("gelir") && norm.includes("gider")) ||
+    norm.includes("nakit akis") ||
+    (norm.includes("tasarruf") && norm.includes("orani")) ||
+    (norm.includes("denge") && (norm.includes("gelir") || norm.includes("gider")))
+  ) {
+    return "income_expense_balance";
+  }
+
+  // 5. Harcama riski — özellikle "riskli alan/kategori" ifadesi
+  if (
+    norm.includes("riskli alan") ||
+    norm.includes("riskli gider") ||
+    norm.includes("riskli kategori") ||
+    (norm.includes("riskli") && (norm.includes("nere") || norm.includes("hangi"))) ||
+    norm.includes("en cok nereye") ||
+    norm.includes("en fazla nereye")
+  ) {
+    return "spending_risk";
+  }
+
+  // 6. Bütçe aşımı
+  if (
+    (norm.includes("butce") && (norm.includes("asim") || norm.includes("astim") || norm.includes("asildi") || norm.includes("var mi"))) ||
+    norm.includes("butce asim")
+  ) {
+    return "budget_overrun";
+  }
+
+  // 7. Detaylı borç analizi + öncelik (basit borç sorusundan önce)
+  if (
+    (norm.includes("borc") || norm.includes("borcum")) &&
+    (norm.includes("analiz") || norm.includes("oncelik") || norm.includes("siralama") || norm.includes("yonet") || norm.includes("strateji"))
+  ) {
+    return "debt_analysis";
+  }
+
+  // 8. Finansal sağlık skoru
+  if (
+    norm.includes("skor") ||
+    (norm.includes("saglik") && (norm.includes("skoru") || norm.includes("puanim") || norm.includes("durumum"))) ||
+    norm.includes("finansal durumum nasil")
   ) {
     return "FinancialHealthAgent";
   }
+
+  // 9. Hedef planlama — ne kadar ayırmalıyım gibi
   if (
-    normalizedMessage.includes("aksiyon") ||
-    normalizedMessage.includes("gorev") ||
-    normalizedMessage.includes("yapilacak") ||
-    normalizedMessage.includes("bu hafta") ||
-    normalizedMessage.includes("3 maddelik") ||
-    normalizedMessage.includes("uc maddelik") ||
-    normalizedMessage.includes("plan yap")
+    norm.includes("hedef") &&
+    (norm.includes("ne kadar") || norm.includes("kac") || norm.includes("ayirmali") || norm.includes("ulasabilir") || norm.includes("plan"))
+  ) {
+    return "GoalPlannerAgent";
+  }
+
+  // 10. Borç (genel)
+  if (norm.includes("borc") || norm.includes("kredi") || norm.includes("faiz")) {
+    return "DebtRiskAgent";
+  }
+
+  // 11. Abonelik
+  if (norm.includes("abonelik") || norm.includes("netflix") || norm.includes("spotify") || norm.includes("ucretsiz")) {
+    return "SubscriptionWasteAgent";
+  }
+
+  // 12. Haftalık aksiyon planı
+  if (
+    norm.includes("aksiyon") ||
+    norm.includes("gorev") ||
+    norm.includes("yapilacak") ||
+    norm.includes("bu hafta") ||
+    norm.includes("ne yapmali")
   ) {
     return "ActionPlanAgent";
   }
+
+  // 13. Harcama analizi (gider tek başına geçiyorsa)
   if (
-    directMessage.includes("harcama") ||
-    directMessage.includes("gider") ||
-    directMessage.includes("masraf") ||
-    directMessage.includes("market") ||
-    directMessage.includes("alışveriş") ||
-    directMessage.includes("azalt") ||
-    directMessage.includes("düşür") ||
-    directMessage.includes("kıs")
+    norm.includes("harcama") ||
+    norm.includes("harcadim") ||
+    norm.includes("masraf") ||
+    norm.includes("market") ||
+    norm.includes("alisveris") ||
+    norm.includes("gider") ||
+    norm.includes("azalt") ||
+    norm.includes("dusur") ||
+    norm.includes("nereye")
   ) {
     return "SpendingAnalysisAgent";
   }
 
+  // 14. Bütçe planlama
+  if (norm.includes("butce") || (norm.includes("plan") && !norm.includes("hedef"))) {
+    return "BudgetPlannerAgent";
+  }
+
+  // 15. Tasarruf / hedef genel
+  if (norm.includes("tasarruf") || norm.includes("biriktir") || norm.includes("hedef")) {
+    return "GoalPlannerAgent";
+  }
+
+  // 16. Rapor / özet → genel finansal özet isteniyor, FinancialHealthAgent daha uygun
+  if (norm.includes("rapor") || norm.includes("ozet")) {
+    return "FinancialHealthAgent";
+  }
+
+  // 17. Gemini LLM ile intent tespiti
   try {
     const response = await generateAIResponse(
       [{ role: "user", content: `Kullanıcı mesajı: "${userMessage}"` }],
-      { systemPrompt: ORCHESTRATOR_INTENT_PROMPT, temperature: 0.1, maxTokens: 50 }
+      { systemPrompt: ORCHESTRATOR_INTENT_PROMPT, temperature: 0.1, maxTokens: 50 },
     );
-
     const agentName = response.text.trim() as AgentType;
     const validAgents: AgentType[] = [
-      "SpendingAnalysisAgent",
-      "BudgetPlannerAgent",
-      "GoalPlannerAgent",
-      "DebtRiskAgent",
-      "SubscriptionWasteAgent",
-      "FinancialHealthAgent",
-      "ActionPlanAgent",
-      "ReportAgent",
-      "ExplanationAgent",
+      "SpendingAnalysisAgent", "BudgetPlannerAgent", "GoalPlannerAgent",
+      "DebtRiskAgent", "SubscriptionWasteAgent", "FinancialHealthAgent",
+      "ActionPlanAgent", "ReportAgent", "ExplanationAgent",
     ];
-
     if (validAgents.includes(agentName)) return agentName;
-  } catch {
-    // Heuristic fallback
-  }
-
-  // Heuristic intent detection
-  const message = normalizedMessage;
-  if (
-    message.includes("harcama") ||
-    message.includes("gider") ||
-    message.includes("masraf") ||
-    message.includes("market") ||
-    message.includes("alışveriş") ||
-    message.includes("azalt") ||
-    message.includes("düşür") ||
-    message.includes("kıs")
-  ) {
-    return "SpendingAnalysisAgent";
-  }
-  if (
-    message.includes("harcama") ||
-    message.includes("gider") ||
-    message.includes("masraf") ||
-    message.includes("market") ||
-    message.includes("alışveriş") ||
-    message.includes("azalt") ||
-    message.includes("düşür") ||
-    message.includes("kıs")
-  ) {
-    return "SpendingAnalysisAgent";
-  }
-  if (message.includes("harcama") || message.includes("nereye") || message.includes("çok harcadım")) {
-    return "SpendingAnalysisAgent";
-  }
-  if (message.includes("bütçe") || message.includes("plan")) {
-    return "BudgetPlannerAgent";
-  }
-  if (message.includes("hedef") || message.includes("biriktir") || message.includes("tasarruf")) {
-    return "GoalPlannerAgent";
-  }
-  if (message.includes("borç") || message.includes("kredi") || message.includes("faiz")) {
-    return "DebtRiskAgent";
-  }
-  if (message.includes("abonelik") || message.includes("netflix") || message.includes("spotify")) {
-    return "SubscriptionWasteAgent";
-  }
-  if (message.includes("skor") || message.includes("sağlık") || message.includes("durum")) {
-    return "FinancialHealthAgent";
-  }
-  if (message.includes("bu hafta") || message.includes("aksiyon") || message.includes("ne yapmalı")) {
-    return "ActionPlanAgent";
-  }
-  if (message.includes("rapor") || message.includes("özet")) {
-    return "ReportAgent";
-  }
+  } catch { /* heuristic fallback */ }
 
   return "ExplanationAgent";
 }
@@ -495,20 +586,78 @@ export async function orchestrate(
       return { agentUsed: "ExplanationAgent", response: greetingResponse, conversationId: activeConversationId, userMessageId: userMsg.id, assistantMessageId: assistantMsg.id };
     }
 
-    // 2. Intent analizi (forceAgent varsa atla)
-    agentUsed = forceAgent ?? await detectIntent(userMessage);
+    // 2. Konuşma bağlamı + intent analizi
+    let orchConvCtx: ConversationContext | undefined;
+    if (conversationId) {
+      orchConvCtx = await loadConversationContext(conversationId).catch(() => undefined);
+    }
+    const orchIntent: ExtendedIntent = forceAgent
+      ? (forceAgent as ExtendedIntent)
+      : await detectIntent(userMessage, orchConvCtx);
+    agentUsed = intentToAgentType(orchIntent);
 
     // 3. Finansal veri çek ve hesaplamalar yap
     const financialData = await buildFinancialContext(userId);
-    const agentInput = { userId, userMessage, financialData };
+    const agentInput: AgentInput = { userId, userMessage, financialData, conversationContext: orchConvCtx };
     fallbackInput = agentInput;
-    const directMetricResponse = buildDirectMetricResponse(agentInput);
 
-    // 3. İlgili agent'ı çağır
+    const skipDirectMetricOrch: ExtendedIntent[] = [
+      "income_expense_balance", "table_format", "explain_previous",
+      "monthly_action_plan", "budget_overrun", "spending_risk", "debt_analysis",
+      "FinancialHealthAgent", "GoalPlannerAgent", "DebtRiskAgent", "BudgetPlannerAgent",
+    ];
+    const directMetricResponse = skipDirectMetricOrch.includes(orchIntent)
+      ? null
+      : buildDirectMetricResponse(agentInput);
+
+    // 4. İlgili agent'ı çağır
     if (directMetricResponse) {
       response = directMetricResponse;
       agentUsed = "SpendingAnalysisAgent";
-    } else switch (agentUsed) {
+    } else switch (orchIntent) {
+      case "income_expense_balance": {
+        const { prompt, systemPrompt } = buildIncomeExpenseBalancePrompt(agentInput);
+        const rawJson = await generateAIJSON<unknown>(prompt, systemPrompt);
+        response = AIResponseSchema.safeParse(rawJson).data ?? buildDeterministicFallbackResponse(agentInput, "SpendingAnalysisAgent");
+        break;
+      }
+      case "table_format": {
+        const { prompt, systemPrompt } = buildTableFormatPrompt(agentInput, orchConvCtx);
+        const rawJson = await generateAIJSON<unknown>(prompt, systemPrompt);
+        response = AIResponseSchema.safeParse(rawJson).data ?? buildDeterministicFallbackResponse(agentInput, "ReportAgent");
+        break;
+      }
+      case "explain_previous": {
+        const { prompt, systemPrompt } = buildExplainPreviousPrompt(agentInput, orchConvCtx);
+        const rawJson = await generateAIJSON<unknown>(prompt, systemPrompt);
+        response = AIResponseSchema.safeParse(rawJson).data ?? buildDeterministicFallbackResponse(agentInput, "ExplanationAgent");
+        break;
+      }
+      case "monthly_action_plan": {
+        const { prompt, systemPrompt } = buildMonthlyActionPlanPrompt(agentInput);
+        const rawJson = await generateAIJSON<unknown>(prompt, systemPrompt);
+        response = AIResponseSchema.safeParse(rawJson).data ?? buildDeterministicFallbackResponse(agentInput, "ActionPlanAgent");
+        break;
+      }
+      case "budget_overrun": {
+        const { prompt, systemPrompt } = buildBudgetOverrunPrompt(agentInput);
+        const rawJson = await generateAIJSON<unknown>(prompt, systemPrompt);
+        response = AIResponseSchema.safeParse(rawJson).data ?? buildDeterministicFallbackResponse(agentInput, "BudgetPlannerAgent");
+        break;
+      }
+      case "BudgetPlannerAgent": {
+        const { prompt, systemPrompt } = buildBudgetPlannerPrompt(agentInput);
+        const rawJson = await generateAIJSON<unknown>(prompt, systemPrompt);
+        response = AIResponseSchema.safeParse(rawJson).data ?? buildDeterministicFallbackResponse(agentInput, "BudgetPlannerAgent");
+        break;
+      }
+      case "debt_analysis": {
+        const { prompt, systemPrompt } = buildDebtAnalysisPrompt(agentInput);
+        const rawJson = await generateAIJSON<unknown>(prompt, systemPrompt);
+        response = AIResponseSchema.safeParse(rawJson).data ?? buildDeterministicFallbackResponse(agentInput, "DebtRiskAgent");
+        break;
+      }
+      case "spending_risk":
       case "SpendingAnalysisAgent":
         response = await SpendingAnalysisAgent(agentInput);
         break;
@@ -837,14 +986,18 @@ function sanitizeAIResponseWithFinancialData(
 
   if (agent === "SpendingAnalysisAgent") {
     const topCategory = financialData.topExpenseCategories[0];
-    if (normalizedMessage.includes("ne kadar") || normalizedMessage.includes("harcadim")) {
-      safeResponse.summary = topCategory
-        ? `Bu ay kayıtlı toplam giderin ${formatMoneyAmount(financialData.monthlyExpenses, financialData.currency)}. Nakit akışın ${formatCashflowPhrase(financialData.netCashflow, financialData.currency)}. En yüksek gider alanın ${topCategory.categoryName}; bu kategori ${formatMoneyAmount(topCategory.amount, financialData.currency)} ile toplam giderinin yaklaşık ${formatPercentValue(topCategory.percent)} kısmını oluşturuyor.`
-        : `Bu ay kayıtlı toplam giderin ${formatMoneyAmount(financialData.monthlyExpenses, financialData.currency)}. Nakit akışın ${formatCashflowPhrase(financialData.netCashflow, financialData.currency)}. Kategori bazlı detay çıkarmak için gider kayıtlarının kategoriyle eklenmesi gerekiyor.`;
-    } else if (normalizedMessage.includes("riskli") || normalizedMessage.includes("risk")) {
-      safeResponse.summary = topCategory
-        ? `Giderlerinde en riskli alan ${topCategory.categoryName}. Bu kategori ${formatMoneyAmount(topCategory.amount, financialData.currency)} ile toplam giderinin yaklaşık ${formatPercentValue(topCategory.percent)} kısmını oluşturuyor; önce bu kalemi kontrol etmek en doğru başlangıç olur.`
-        : "Riskli gider alanını belirlemek için bu ay kategori bazlı gider kaydı görünmüyor. Önce giderleri kategoriyle kaydetmek gerekiyor.";
+    // AI'ın ürettiği özet yeterliyse (>80 karakter) üzerine yazma; directMetric fallback için kısa özetleri düzelt
+    const aiSummaryIsRich = safeResponse.summary.length > 80;
+    if (!aiSummaryIsRich) {
+      if (normalizedMessage.includes("ne kadar") || normalizedMessage.includes("harcadim")) {
+        safeResponse.summary = topCategory
+          ? `Bu ay kayıtlı toplam giderin ${formatMoneyAmount(financialData.monthlyExpenses, financialData.currency)}. Nakit akışın ${formatCashflowPhrase(financialData.netCashflow, financialData.currency)}. En yüksek gider alanın ${topCategory.categoryName}; bu kategori ${formatMoneyAmount(topCategory.amount, financialData.currency)} ile toplam giderinin yaklaşık ${formatPercentValue(topCategory.percent)} kısmını oluşturuyor.`
+          : `Bu ay kayıtlı toplam giderin ${formatMoneyAmount(financialData.monthlyExpenses, financialData.currency)}. Nakit akışın ${formatCashflowPhrase(financialData.netCashflow, financialData.currency)}. Kategori bazlı detay çıkarmak için gider kayıtlarının kategoriyle eklenmesi gerekiyor.`;
+      } else if (normalizedMessage.includes("riskli") || normalizedMessage.includes("risk")) {
+        safeResponse.summary = topCategory
+          ? `Giderlerinde en riskli alan ${topCategory.categoryName}. Bu kategori ${formatMoneyAmount(topCategory.amount, financialData.currency)} ile toplam giderinin yaklaşık ${formatPercentValue(topCategory.percent)} kısmını oluşturuyor; önce bu kalemi kontrol etmek en doğru başlangıç olur.`
+          : "Riskli gider alanını belirlemek için bu ay kategori bazlı gider kaydı görünmüyor. Önce giderleri kategoriyle kaydetmek gerekiyor.";
+      }
     }
 
     safeResponse.chart = financialData.topExpenseCategories.length
@@ -1159,20 +1312,26 @@ function buildDeterministicFallbackResponse(input: AgentInput, agent: AgentType)
     insights: [
       {
         title: "Net Nakit Akışı",
-        description: `${data.netCashflow.toFixed(0)} ${currency} seviyesinde net akış görünüyor.`,
+        description: data.netCashflow >= 0
+          ? `Bu ay ${data.netCashflow.toFixed(0)} ${currency} pozitif nakit akışı var — gelir gideri karşılıyor.`
+          : `Bu ay ${Math.abs(data.netCashflow).toFixed(0)} ${currency} açık var — giderler geliri aşıyor.`,
         severity: data.netCashflow >= 0 ? "low" : "high",
       },
       {
         title: "Tasarruf Oranı",
-        description: `Mevcut tasarruf oranı %${data.savingRate.toFixed(1)}.`,
+        description: data.savingRate >= 20
+          ? `Tasarruf oranı %${data.savingRate.toFixed(1)} — hedef üstünde, iyi durumda.`
+          : data.savingRate >= 10
+            ? `Tasarruf oranı %${data.savingRate.toFixed(1)} — orta seviyede, artırılabilir.`
+            : `Tasarruf oranı %${data.savingRate.toFixed(1)} — düşük, öncelikli olarak artırılmalı.`,
         severity: data.savingRate >= 20 ? "low" : data.savingRate >= 10 ? "medium" : "high",
       },
       {
         title: topCategory ? "En Büyük Gider Alanı" : "Veri Eksikliği",
         description: topCategory
-          ? `${topCategory.categoryName} kategorisi ${topCategory.amount.toFixed(0)} ${currency} ile öne çıkıyor.`
+          ? `${topCategory.categoryName} kategorisi ${topCategory.amount.toFixed(0)} ${currency} ile toplam giderin %${topCategory.percent.toFixed(1)}'ini oluşturuyor.`
           : "Kategori bazlı gider verisi olmadığı için ayrıntılı dağılım çıkarılamıyor.",
-        severity: topCategory && topCategory.percent > 40 ? "medium" : "low",
+        severity: topCategory && topCategory.percent > 40 ? "high" : topCategory ? "medium" : "low",
       },
     ],
     recommendations: [
@@ -1329,18 +1488,36 @@ export async function* orchestrateStream(
       return;
     }
 
-    // ── Intent detection + financial context ────────────────────
-    agentUsed = forceAgent ?? (await detectIntent(userMessage));
+    // ── Conversation context + intent detection + financial context ─
+    let conversationCtx: ConversationContext | undefined;
+    if (conversationId) {
+      conversationCtx = await loadConversationContext(conversationId).catch(() => undefined);
+    }
+    if (signal?.aborted) return;
+
+    const intent: ExtendedIntent = forceAgent
+      ? (forceAgent as ExtendedIntent)
+      : await detectIntent(userMessage, conversationCtx);
+    agentUsed = intentToAgentType(intent);
     if (signal?.aborted) return;
 
     const financialData = await buildFinancialContext(userId);
     if (signal?.aborted) return;
 
-    const agentInput = { userId, userMessage, financialData };
+    const agentInput: AgentInput = { userId, userMessage, financialData, conversationContext: conversationCtx };
     fallbackInput = agentInput;
 
-    // ── Build prompt for the selected agent ─────────────────────
-    const directMetricResponse = buildDirectMetricResponse(agentInput);
+    // ── Yeni intentler ve detaylı analiz isteyen sorular için directMetric'i atla ─
+    const skipDirectMetric: ExtendedIntent[] = [
+      "income_expense_balance", "table_format", "explain_previous",
+      "monthly_action_plan", "budget_overrun", "spending_risk", "debt_analysis",
+      "FinancialHealthAgent", "GoalPlannerAgent", "DebtRiskAgent", "BudgetPlannerAgent",
+    ];
+
+    const directMetricResponse = skipDirectMetric.includes(intent)
+      ? null
+      : buildDirectMetricResponse(agentInput);
+
     if (directMetricResponse) {
       const assistantContent = formatCompactAssistantContent(directMetricResponse, "SpendingAnalysisAgent");
       if (assistantContent.trim()) yield { type: "delta", text: assistantContent };
@@ -1403,19 +1580,54 @@ export async function* orchestrateStream(
         }
       | undefined;
 
-    switch (agentUsed) {
+    // intent bazlı prompt seçimi (ExtendedIntent → prompt)
+    switch (intent) {
+      case "income_expense_balance": {
+        const p = buildIncomeExpenseBalancePrompt(agentInput);
+        prompt = p.prompt; agentSystemPrompt = p.systemPrompt;
+        break;
+      }
+      case "table_format": {
+        const p = buildTableFormatPrompt(agentInput, conversationCtx);
+        prompt = p.prompt; agentSystemPrompt = p.systemPrompt;
+        break;
+      }
+      case "explain_previous": {
+        const p = buildExplainPreviousPrompt(agentInput, conversationCtx);
+        prompt = p.prompt; agentSystemPrompt = p.systemPrompt;
+        break;
+      }
+      case "monthly_action_plan": {
+        const p = buildMonthlyActionPlanPrompt(agentInput);
+        prompt = p.prompt; agentSystemPrompt = p.systemPrompt;
+        break;
+      }
+      case "budget_overrun": {
+        const p = buildBudgetOverrunPrompt(agentInput);
+        prompt = p.prompt; agentSystemPrompt = p.systemPrompt;
+        break;
+      }
+      case "BudgetPlannerAgent": {
+        const p = buildBudgetPlannerPrompt(agentInput);
+        prompt = p.prompt; agentSystemPrompt = p.systemPrompt;
+        break;
+      }
+      case "spending_risk":
       case "SpendingAnalysisAgent": {
         const p = buildSpendingAnalysisPrompt(agentInput);
         prompt = p.prompt; agentSystemPrompt = p.systemPrompt;
         break;
       }
-      case "GoalPlannerAgent": {
-        const p = buildGoalPlannerPrompt(agentInput);
+      case "debt_analysis":
+      case "DebtRiskAgent": {
+        const p = intent === "debt_analysis"
+          ? buildDebtAnalysisPrompt(agentInput)
+          : buildDebtRiskPrompt(agentInput);
         prompt = p.prompt; agentSystemPrompt = p.systemPrompt;
         break;
       }
-      case "DebtRiskAgent": {
-        const p = buildDebtRiskPrompt(agentInput);
+      case "GoalPlannerAgent": {
+        const p = buildGoalPlannerPrompt(agentInput);
         prompt = p.prompt; agentSystemPrompt = p.systemPrompt;
         break;
       }
@@ -1539,7 +1751,8 @@ export async function* orchestrateStream(
     if (signal?.aborted) return;
 
     if (fallbackInput) {
-      const fallbackResponse = buildDeterministicFallbackResponse(fallbackInput, agentUsed);
+      let fallbackResponse = buildDeterministicFallbackResponse(fallbackInput, agentUsed);
+      fallbackResponse = sanitizeAIResponseWithFinancialData(fallbackResponse, fallbackInput.financialData, agentUsed, userMessage);
       const assistantContent = formatCompactAssistantContent(fallbackResponse, agentUsed);
       let activeConvId = conversationId ?? "";
 

@@ -20,15 +20,17 @@ export interface AIResponse {
 }
 
 const DEFAULT_GEMINI_MODEL = "gemini-2.5-flash";
-const FALLBACK_GEMINI_MODEL = "gemini-2.5-flash-lite";
+const FALLBACK_GEMINI_MODEL = "gemini-2.5-flash";
 
 const AI_QUALITY_RULES = `KALİTE KURALLARI:
-- Türkçe, doğal, net ve yardımcı bir finans koçu gibi yaz.
-- Genel geçer tavsiye verme; cevabı kullanıcının verilen gelir, gider, borç, hedef ve abonelik verilerine bağla.
-- Veri yoksa bunu açıkça söyle ve yine de uygulanabilir bir başlangıç önerisi sun.
-- Summary alanı 2-4 cümle olsun: önce net teşhis, sonra neden önemli olduğu, sonra ana öneri.
+- Türkçe yaz — günlük dilde, samimi, finans koçu gibi. Resmi veya robot gibi cümleler kurma.
+- ZORUNLU: Prompttaki gerçek rakamları kullan — gelir, gider, nakit akışı, tasarruf oranı, kategori tutarlarını doğrudan yaz. "Gelirinize göre..." gibi belirsiz ifadeler kullanma; "15.000 ₺ gelirinizle..." gibi somut söyle.
+- Genel geçer tavsiye verme; her cümleyi kullanıcının gerçek verisine bağla.
+- Veri yoksa bunu kısaca söyle ve uygulanabilir bir başlangıç önerisi sun.
+- Summary alanı 2-4 cümle olsun: önce net teşhis (sayıyla), sonra neden önemli, sonra ana öneri.
+- Her insight ve recommendation farklı bir konuya odaklansın; aynı fikri farklı başlıkla tekrarlama.
 - Insight açıklamaları somut gözlem içersin; recommendation action alanları doğrudan yapılabilir adımlar olsun.
-- Mümkünse estimatedImpact alanını doldur ve etkiyi para, yüzde, zaman veya davranış değişikliği olarak ifade et.
+- estimatedImpact alanını doldur: para (₺), yüzde (%) veya zaman olarak ifade et.
 - Action item üretirken ölçülebilir, küçük ve bu hafta yapılabilir görevler yaz.
 - followUps alanına kullanıcının tıklayıp gönderebileceği 2-3 kısa soru ekle. Sorular MUTLAKA kullanıcının ağzından, birinci şahıs veya kısa emir kipiyle yazılsın (örn: "Borcumu nasıl kapatabilirim?", "3 aylık plan yap", "Aboneliklerimi göster"). ASLA "Sizin borcunuzu..." veya "Hedeflerinizi..." gibi AI perspektifinden yazma.`;
 
@@ -47,7 +49,7 @@ async function callGeminiWithModel(
   options: AIGenerateOptions = {}
 ): Promise<AIResponse> {
   const apiKey = process.env.GEMINI_API_KEY;
-  const temperature = options.temperature ?? Number(process.env.AI_TEMPERATURE ?? "0.4");
+  const temperature = options.temperature ?? Number(process.env.AI_TEMPERATURE ?? "0.6");
   const maxOutputTokens = options.maxTokens ?? Number(process.env.AI_MAX_TOKENS ?? "3072");
 
   if (!apiKey || apiKey.includes("your-gemini-api-key")) {
@@ -250,7 +252,7 @@ export async function* streamAIJSONChunks(
   const apiKey = process.env.GEMINI_API_KEY;
   const model = (process.env.AI_MODEL ?? DEFAULT_GEMINI_MODEL).trim() || DEFAULT_GEMINI_MODEL;
   const fallbackModel = FALLBACK_GEMINI_MODEL;
-  const temperature = options.temperature ?? Number(process.env.AI_TEMPERATURE ?? "0.4");
+  const temperature = options.temperature ?? Number(process.env.AI_TEMPERATURE ?? "0.6");
   const maxOutputTokens = options.maxTokens ?? Number(process.env.AI_MAX_TOKENS ?? "3072");
 
   if (!apiKey || apiKey.includes("your-gemini-api-key")) {

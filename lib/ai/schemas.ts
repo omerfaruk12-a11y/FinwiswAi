@@ -43,8 +43,8 @@ export const AIResponseSchema = z.object({
     mainIssue: z.string().min(1),
     explanation: z.string().min(1),
   }),
-  insights: z.array(AIInsightSchema).min(1),
-  recommendations: z.array(AIRecommendationSchema).min(1),
+  insights: z.array(AIInsightSchema),
+  recommendations: z.array(AIRecommendationSchema),
   numbers: z.object({
     monthlyIncome: z.number().optional(),
     monthlyExpense: z.number().optional(),

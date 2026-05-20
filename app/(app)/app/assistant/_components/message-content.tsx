@@ -42,14 +42,27 @@ const cardVariants = {
 };
 
 export function MessageContent({ content, response, isStreaming, agentUsed }: MessageContentProps) {
-  const showCards = !isStreaming && response;
-  const fullAnalysisAgents = new Set(["FinancialHealthAgent", "ReportAgent"]);
+  // Tablo yanıtlarını (summary | ile başlıyorsa veya | --- | içeriyorsa) sadece metin olarak göster
+  const summaryIsTable = !!response?.summary && /\|[-: ]+\|/.test(response.summary);
+  const showCards = !isStreaming && response && !summaryIsTable;
+  const fullAnalysisAgents = new Set([
+    "FinancialHealthAgent",
+    "ReportAgent",
+    "ExplanationAgent",
+    "SpendingAnalysisAgent",
+    "BudgetPlannerAgent",
+    "GoalPlannerAgent",
+    "DebtRiskAgent",
+    "SubscriptionWasteAgent",
+  ]);
   const isFullAnalysis = !!agentUsed && fullAnalysisAgents.has(agentUsed);
   const isActionPlan = agentUsed === "ActionPlanAgent";
+  // Monthly plan has dueInDays 30/60/90; weekly plan has 3/5/7
+  const isMonthlyPlan = isActionPlan && (response?.actionItems?.[0]?.dueInDays ?? 0) > 14;
   const showDiagnosis = showCards && isFullAnalysis && response.diagnosis.explanation;
-  const showInsights = showCards && isFullAnalysis && response.insights.length > 0;
+  const showInsights = showCards && (isFullAnalysis || isMonthlyPlan) && response.insights.length > 0;
   const showChart = showCards && isFullAnalysis && response.chart;
-  const showRecommendations = showCards && isFullAnalysis && response.recommendations.length > 0;
+  const showRecommendations = showCards && (isFullAnalysis || isMonthlyPlan) && response.recommendations.length > 0;
   const showActionItems = showCards && isActionPlan && response.actionItems.length > 0;
   const showResultActions = showCards && isFullAnalysis;
 
@@ -208,7 +221,7 @@ export function MessageContent({ content, response, isStreaming, agentUsed }: Me
           <div className="flex items-center gap-2 px-3 py-2 bg-blue-50/80 border-b border-blue-100">
             <CheckCircle2 className="w-3.5 h-3.5 text-blue-600" />
             <span className="text-[11px] font-semibold uppercase tracking-wider text-blue-700">
-              Bu Hafta Yapılacaklar
+              {isMonthlyPlan ? "Aylık Eylem Planı" : "Bu Hafta Yapılacaklar"}
             </span>
           </div>
           <ol className="divide-y divide-blue-50/70">
